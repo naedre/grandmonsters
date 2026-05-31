@@ -19,54 +19,50 @@ ALL_COMBINED = SAGITTARIUS_HUMANS.union(RAW_ALL_BOTS).union(GRAND_MONSTERS).unio
 UNIQUE_MAPPING = {name.lower(): name for name in ALL_COMBINED} 
 USERS = sorted(list(UNIQUE_MAPPING.keys()), key=str.casefold)
 
-CACHE = {"data": [], "updated": "Never", "loading": True, "progress": "Initializing dashboard sync..."}
+CACHE = {"data": [], "updated": "Never", "loading": True, "progress": "Waiting for server deployment routing..."}
 FIELDS = [("avg", "ELO"), ("bullet", "Bullet"), ("blitz", "Blitz"), ("rapid", "Rapid"), ("classical", "Classical"), ("chess960", "960"), ("crazy", "Crazy"), ("koth", "KOTH"), ("three", "3C"), ("anti", "Anti"), ("atomic", "Atomic"), ("horde", "Horde"), ("racing", "RK"), ("puzzle", "Puzzle")]
 
 session = requests.Session()
-session.headers.update({"User-Agent": "SagittariusLeaderboard/5.0"})
+session.headers.update({"User-Agent": "SagittariusLeaderboard/6.0"})
 
 def update_loop():
     global CACHE
+    # CRITICAL: Allow Render 10 seconds to finish its verification handshake and unlock routing
+    time.sleep(10)
+    
     while True:
         try:
             CACHE["loading"] = True
             statuses = {}
             
-            # 1. Fetch online statuses using GET query string parameters
+            # Fetch user online statuses
             for i in range(0, len(USERS), 100):
-                try:
-                    chunk = USERS[i:i+100]
-                    res = session.get(f"https://lichess.org/api/users/status?ids={','.join(chunk)}", timeout=10)
-                    if res.status_code == 200:
-                        for n in res.json(): 
-                            statuses[n["id"].lower()] = n.get("online", False)
-                except Exception as e:
-                    print(f"Status check error: {e}")
+                chunk = USERS[i:i+100]
+                res = session.get(f"https://lichess.org/api/users/status?ids={','.join(chunk)}", timeout=10)
+                if res.status_code == 200:
+                    for n in res.json(): 
+                        statuses[n["id"].lower()] = n.get("online", False)
                 time.sleep(0.3)
 
             downloaded_profiles = {}
             
-            # 2. FIXED: Utilizing a GET request via the `?ids=` param to eliminate POST body parsing errors entirely
+            # Fetch profile metrics data
             for i in range(0, len(USERS), 100):
-                try:
-                    CACHE["progress"] = f"Streaming user tracking metrics: {i}/{len(USERS)} resolved..."
-                    chunk = USERS[i:i+100]
-                    
+                CACHE["progress"] = f"Streaming user tracking metrics: {i}/{len(USERS)} resolved..."
+                chunk = USERS[i:i+100]
+                
+                res = session.get(f"https://lichess.org/api/users?ids={','.join(chunk)}", timeout=15)
+                if res.status_code == 429:
+                    time.sleep(20)
                     res = session.get(f"https://lichess.org/api/users?ids={','.join(chunk)}", timeout=15)
-                    if res.status_code == 429:
-                        time.sleep(20)
-                        res = session.get(f"https://lichess.org/api/users?ids={','.join(chunk)}", timeout=15)
-                        
-                    if res.status_code == 200:
-                        for p in res.json():
-                            downloaded_profiles[p.get("id", "").lower()] = p
-                except Exception as e:
-                    print(f"Database stream error: {e}")
+                    
+                if res.status_code == 200:
+                    for p in res.json():
+                        downloaded_profiles[p.get("id", "").lower()] = p
                 time.sleep(0.5)
 
             results, all_values = [], {k: [] for k, _ in FIELDS + [("games", "")]}
             
-            # 3. Process records and build profile maps
             for u_low in USERS:
                 fallback_display_name = UNIQUE_MAPPING.get(u_low, u_low)
                 data = downloaded_profiles.get(u_low, {"id": u_low, "username": fallback_display_name})
@@ -77,8 +73,6 @@ def update_loop():
                 is_all_bot = u_low in all_bots_low or is_grand or is_team
                 
                 perfs = data.get("perfs", {})
-                
-                # Aggregate games field across performance variants to derive total games played
                 total_games = sum(perfs.get(variant, {}).get("games", 0) for variant in perfs)
                 
                 if is_sagi and total_games < 120 and "perfs" in data: 
@@ -122,10 +116,13 @@ def update_loop():
                 "progress": f"Analysis complete. Synced {len(results)} profile tracks.", 
                 "loading": False
             })
+            time.sleep(900) # Wait 15 minutes before running the next successful cycle
+            
         except Exception as e: 
-            print(f"Global worker exception: {e}")
-            time.sleep(10)
-        time.sleep(900)
+            # FIXED: If a connection error occurs on boot, retry quickly in 15 seconds instead of dropping out
+            print(f"Global worker exception managed: {e}")
+            CACHE["progress"] = "Network dropped out. Re-attempting pipeline synchronization..."
+            time.sleep(15)
 
 if not hasattr(app, '_updater_started'):
     threading.Thread(target=update_loop, daemon=True).start()
@@ -179,7 +176,8 @@ function sortTable(columnIndex) {
     const ascending = sortDirections[columnIndex]; lastSortedColumn = columnIndex;
     rows.sort((rowA, rowB) => {
         let cellA = rowA.getElementsByTagName("td")[columnIndex].textContent.trim(), cellB = rowB.getElementsByTagName("td")[columnIndex].textContent.trim();
-        let numA = (cellA === "-") ? 0 : parseFloat(cellA.replace(/[^\d.-]/g, '')), numB = (cellB === "-") ? 0 : parseFloat(cellB.replace(/[^\d.-]/g, ''));
+        // FIXED: Using a raw escape sequence inside standard strings to avoid future JavaScript parsing warnings
+        let numA = (cellA === "-") ? 0 : parseFloat(cellA.replace(/[^\\d.-]/g, '')), numB = (cellB === "-") ? 0 : parseFloat(cellB.replace(/[^\\d.-]/g, ''));
         if (!isNaN(numA) && !isNaN(numB)) {
             if (!ascending) return (numA === 0 && numB !== 0) ? 1 : (numB === 0 && numA !== 0) ? -1 : numB - numA;
             return (numA === 0 && numB !== 0) ? 1 : (numB === 0 && numA !== 0) ? -1 : numA - numB;
@@ -195,7 +193,7 @@ function updateColorsAndRanks() {
         row.querySelector(".row-rank").innerText = index + 1;
         let cellVal = row.getElementsByTagName("td")[lastSortedColumn].textContent.trim();
         if (cellVal !== "-" && lastSortedColumn !== 1 && lastSortedColumn !== 15) {
-            let num = parseFloat(cellVal.replace(/[^\d.-]/g, ''));
+            let num = parseFloat(cellVal.replace(/[^\\d.-]/g, ''));
             if (!isNaN(num) && !distinctVals.includes(num)) distinctVals.push(num);
         }
     });
@@ -205,7 +203,7 @@ function updateColorsAndRanks() {
     visibleRows.forEach(row => {
         let cellVal = row.getElementsByTagName("td")[lastSortedColumn].textContent.trim(), colorStr = "#666";
         if (cellVal !== "-" && lastSortedColumn !== 1 && lastSortedColumn !== 15) {
-            let num = parseFloat(cellVal.replace(/[^\d.-]/g, ''));
+            let num = parseFloat(cellVal.replace(/[^\\d.-]/g, ''));
             if (!isNaN(num)) {
                 let vIdx = distinctVals.indexOf(num);
                 let revIdx = totalCount - 1 - vIdx;
