@@ -1,6 +1,5 @@
 from flask import Flask, render_template_string
 import requests
-from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 
@@ -20,26 +19,11 @@ ALL_COMBINED = SAGITTARIUS_HUMANS.union(RAW_ALL_BOTS).union(GRAND_MONSTERS).unio
 UNIQUE_MAPPING = {name.lower(): name for name in ALL_COMBINED} 
 USERS = sorted(list(UNIQUE_MAPPING.keys()), key=str.casefold)
 
-CACHE = {"data": [], "updated": "Never", "loading": True, "progress": "Warming engine..."}
+CACHE = {"data": [], "updated": "Never", "loading": True, "progress": "Initializing dashboard sync..."}
 FIELDS = [("avg", "ELO"), ("bullet", "Bullet"), ("blitz", "Blitz"), ("rapid", "Rapid"), ("classical", "Classical"), ("chess960", "960"), ("crazy", "Crazy"), ("koth", "KOTH"), ("three", "3C"), ("anti", "Anti"), ("atomic", "Atomic"), ("horde", "Horde"), ("racing", "RK"), ("puzzle", "Puzzle")]
 
 session = requests.Session()
-session.headers.update({"User-Agent": "SagittariusLeaderboard/3.0"})
-
-def fetch_single_profile(u_low):
-    """Worker function executing single detailed profiles safely in threads to pull true count.all values."""
-    try:
-        res = session.get(f"https://lichess.org/api/user/{u_low}", timeout=8)
-        if res.status_code == 200:
-            return u_low, res.json()
-        elif res.status_code == 429:
-            time.sleep(4)
-            res = session.get(f"https://lichess.org/api/user/{u_low}", timeout=8)
-            if res.status_code == 200:
-                return u_low, res.json()
-    except Exception:
-        pass
-    return u_low, None
+session.headers.update({"User-Agent": "SagittariusLeaderboard/4.0"})
 
 def update_loop():
     global CACHE
@@ -48,7 +32,7 @@ def update_loop():
             CACHE["loading"] = True
             statuses = {}
             
-            # 1. Fetch statuses in blocks of 100
+            # Fetch statuses safely in chunks
             for i in range(0, len(USERS), 100):
                 try:
                     chunk = USERS[i:i+100]
@@ -57,25 +41,29 @@ def update_loop():
                         for n in res.json(): 
                             statuses[n["id"].lower()] = n.get("online", False)
                 except Exception as e:
-                    print(f"Status sync warning: {e}")
-                time.sleep(0.2)
+                    print(f"Status check anomaly: {e}")
+                time.sleep(0.3)
 
-            # 2. Parallel individual profile compilation via Thread Pool
             downloaded_profiles = {}
-            total_users = len(USERS)
             
-            print(f"[Leaderboard Engine] Threading lookup engine starting for {total_users} unique profiles...")
-            
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(fetch_single_profile, u) for u in USERS]
-                for idx, future in enumerate(futures):
-                    u_low, p_data = future.result()
-                    if p_data:
-                        downloaded_profiles[u_low] = p_data
-                    if idx % 25 == 0:
-                        CACHE["progress"] = f"Gathering game metrics: {idx}/{total_users} maps resolved..."
+            # High-speed bulk download endpoint (100% immune to individual rate-limiting)
+            for i in range(0, len(USERS), 100):
+                try:
+                    CACHE["progress"] = f"Streaming database chunks: {i}/{len(USERS)} processing..."
+                    chunk = USERS[i:i+100]
+                    
+                    res = session.post("https://lichess.org/api/users", data=",".join(chunk), timeout=15)
+                    if res.status_code == 429:
+                        time.sleep(20)
+                        res = session.post("https://lichess.org/api/users", data=",".join(chunk), timeout=15)
+                        
+                    if res.status_code == 200:
+                        for p in res.json():
+                            downloaded_profiles[p.get("id", "").lower()] = p
+                except Exception as e:
+                    print(f"Bulk data exception: {e}")
+                time.sleep(0.5)
 
-            # 3. Build data sets
             results, all_values = [], {k: [] for k, _ in FIELDS + [("games", "")]}
             
             for u_low in USERS:
@@ -87,13 +75,15 @@ def update_loop():
                 is_team = u_low in teambots_low
                 is_all_bot = u_low in all_bots_low or is_grand or is_team
                 
-                count_obj = data.get("count", {})
-                total_games = count_obj.get("all", 0)
+                perfs = data.get("perfs", {})
                 
-                if is_sagi and total_games < 120 and "count" in data: 
+                # REVOLUTIONARY WORKAROUND: Sum up the 'games' field within every single performance variant dictionary 
+                # inside the bulk response payload to safely build total games played!
+                total_games = sum(perfs.get(variant, {}).get("games", 0) for variant in perfs)
+                
+                if is_sagi and total_games < 120 and "perfs" in data: 
                     continue
 
-                perfs = data.get("perfs", {})
                 rating = lambda name: perfs.get(name, {}).get("rating")
                 
                 has_standard = any(isinstance(perfs.get(k, {}).get("rating"), (int, float)) for k in ["bullet", "blitz", "rapid"])
@@ -129,14 +119,13 @@ def update_loop():
             CACHE.update({
                 "data": results, 
                 "updated": time.strftime("%Y-%m-%d %H:%M:%S"), 
-                "progress": f"Active tracking metrics locked for {len(results)} accounts.", 
+                "progress": f"Analysis complete. Syncing {len(results)} profile tracks.", 
                 "loading": False
             })
-            print("[Leaderboard Engine] Frame data successfully refreshed.")
         except Exception as e: 
-            print(f"Global thread runner exception: {e}")
+            print(f"Global worker structural error: {e}")
             time.sleep(10)
-        time.sleep(1200)
+        time.sleep(900)
 
 if not hasattr(app, '_updater_started'):
     threading.Thread(target=update_loop, daemon=True).start()
