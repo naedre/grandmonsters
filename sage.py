@@ -23,7 +23,7 @@ CACHE = {"data": [], "updated": "Never", "loading": True, "progress": "Initializ
 FIELDS = [("avg", "ELO"), ("bullet", "Bullet"), ("blitz", "Blitz"), ("rapid", "Rapid"), ("classical", "Classical"), ("chess960", "960"), ("crazy", "Crazy"), ("koth", "KOTH"), ("three", "3C"), ("anti", "Anti"), ("atomic", "Atomic"), ("horde", "Horde"), ("racing", "RK"), ("puzzle", "Puzzle")]
 
 session = requests.Session()
-session.headers.update({"User-Agent": "SagittariusLeaderboard/4.0"})
+session.headers.update({"User-Agent": "SagittariusLeaderboard/5.0"})
 
 def update_loop():
     global CACHE
@@ -32,7 +32,7 @@ def update_loop():
             CACHE["loading"] = True
             statuses = {}
             
-            # Fetch statuses safely in chunks
+            # 1. Fetch online statuses using GET query string parameters
             for i in range(0, len(USERS), 100):
                 try:
                     chunk = USERS[i:i+100]
@@ -41,31 +41,32 @@ def update_loop():
                         for n in res.json(): 
                             statuses[n["id"].lower()] = n.get("online", False)
                 except Exception as e:
-                    print(f"Status check anomaly: {e}")
+                    print(f"Status check error: {e}")
                 time.sleep(0.3)
 
             downloaded_profiles = {}
             
-            # High-speed bulk download endpoint (100% immune to individual rate-limiting)
+            # 2. FIXED: Utilizing a GET request via the `?ids=` param to eliminate POST body parsing errors entirely
             for i in range(0, len(USERS), 100):
                 try:
-                    CACHE["progress"] = f"Streaming database chunks: {i}/{len(USERS)} processing..."
+                    CACHE["progress"] = f"Streaming user tracking metrics: {i}/{len(USERS)} resolved..."
                     chunk = USERS[i:i+100]
                     
-                    res = session.post("https://lichess.org/api/users", data=",".join(chunk), timeout=15)
+                    res = session.get(f"https://lichess.org/api/users?ids={','.join(chunk)}", timeout=15)
                     if res.status_code == 429:
                         time.sleep(20)
-                        res = session.post("https://lichess.org/api/users", data=",".join(chunk), timeout=15)
+                        res = session.get(f"https://lichess.org/api/users?ids={','.join(chunk)}", timeout=15)
                         
                     if res.status_code == 200:
                         for p in res.json():
                             downloaded_profiles[p.get("id", "").lower()] = p
                 except Exception as e:
-                    print(f"Bulk data exception: {e}")
+                    print(f"Database stream error: {e}")
                 time.sleep(0.5)
 
             results, all_values = [], {k: [] for k, _ in FIELDS + [("games", "")]}
             
+            # 3. Process records and build profile maps
             for u_low in USERS:
                 fallback_display_name = UNIQUE_MAPPING.get(u_low, u_low)
                 data = downloaded_profiles.get(u_low, {"id": u_low, "username": fallback_display_name})
@@ -77,8 +78,7 @@ def update_loop():
                 
                 perfs = data.get("perfs", {})
                 
-                # REVOLUTIONARY WORKAROUND: Sum up the 'games' field within every single performance variant dictionary 
-                # inside the bulk response payload to safely build total games played!
+                # Aggregate games field across performance variants to derive total games played
                 total_games = sum(perfs.get(variant, {}).get("games", 0) for variant in perfs)
                 
                 if is_sagi and total_games < 120 and "perfs" in data: 
@@ -119,11 +119,11 @@ def update_loop():
             CACHE.update({
                 "data": results, 
                 "updated": time.strftime("%Y-%m-%d %H:%M:%S"), 
-                "progress": f"Analysis complete. Syncing {len(results)} profile tracks.", 
+                "progress": f"Analysis complete. Synced {len(results)} profile tracks.", 
                 "loading": False
             })
         except Exception as e: 
-            print(f"Global worker structural error: {e}")
+            print(f"Global worker exception: {e}")
             time.sleep(10)
         time.sleep(900)
 
