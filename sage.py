@@ -79,7 +79,9 @@ def update_loop():
         except Exception as e: print(f"Global worker error: {e}"); time.sleep(10)
         time.sleep(1800)
 
-threading.Thread(target=update_loop, daemon=True).start()
+if not hasattr(app, '_updater_started'):
+    threading.Thread(target=update_loop, daemon=True).start()
+    app._updater_started = True
 
 HTML = """<!DOCTYPE html><html><head><title>The GrandMonsters Leaderboard</title><style>
 *{box-sizing:border-box}body{margin:0;padding:20px;background:#0b0b12 radial-gradient(white,rgba(255,255,255,.15) 2px,transparent 40px) fixed;background-image:radial-gradient(white,rgba(255,255,255,.15) 2px,transparent 40px),radial-gradient(white,rgba(255,255,255,.1) 1px,transparent 30px),url('https://images.unsplash.com/photo-1506318137071-a8e063b4bec0?q=80&w=2000');background-size:550px 550px,350px 350px,cover;background-position:0 0,40px 60px,center;color:#e0e0ed;font-family:Verdana,sans-serif}
